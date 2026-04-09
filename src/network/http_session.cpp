@@ -1,0 +1,318 @@
+#include "../../include/mind_map/network/sessions.hpp"
+#include <boost/json.hpp>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
+#include <regex>
+
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace json = boost::json;
+
+namespace mind_map::network {
+    void http_session::send_response(http::response<http::string_body> &&res) {
+        auto shared_res = std::make_shared<http::response<http::string_body> >(std::move(res));
+        http::async_write(stream_, *shared_res,
+                          [self = shared_from_this(), shared_res](beast::error_code ec, std::size_t) {
+                              if (!ec) {
+                                  if (shared_res->need_eof()) {
+                                      self->stream_.socket().shutdown(tcp::socket::shutdown_both, ec);
+                                  } else {
+                                      self->do_read();
+                                  }
+                              }
+                          });
+    }
+
+    void http_session::on_read(beast::error_code ec, std::size_t) {
+        if (ec == http::error::end_of_stream) {
+            return;
+        }
+
+        if (ec) {
+            return fail(ec, "read");
+        }
+
+        if (websocket::is_upgrade(req_)) {
+            std::make_shared<websocket_session>(stream_.release_socket(), service_)->run(std::move(req_));
+            return;
+        }
+
+        handle_request();
+    }
+
+    void http_session::handle_request() {
+        http::response<http::string_body> res{http::status::ok, req_.version()};
+        res.set(http::field::content_type, "application/json");
+        res.keep_alive(req_.keep_alive());
+
+        try {
+            auto target_sv = req_.target();
+            std::string target(target_sv.data(), target_sv.size());
+            std::string path = target;
+            std::string query;
+            size_t query_pos = target.find('?');
+            if (query_pos != std::string::npos) {
+                path = target.substr(0, query_pos);
+                query = target.substr(query_pos + 1);
+            }
+
+            auto method = req_.method();
+
+            if (method == http::verb::post && path == "/spaces") {
+                json::value jv = json::parse(req_.body());
+                UserId owner_id = jv.as_object().at("user_id").as_string().c_str();
+                SpaceId space_id;
+                OperationResult or_ = service_.create_space(owner_id, space_id);
+                if (or_.code == StatusCode::Ok) {
+                    json::object result;
+                    result["space_id"] = space_id;
+                    result["revision"] = or_.space_revision;
+                    res.body() = json::serialize(result);
+                } else {
+                    res.result(http::status::bad_request);
+                    json::object error;
+                    error["error"] = "Failed to create space";
+                    res.body() = json::serialize(error);
+                }
+            } else if (method == http::verb::get && std::regex_match(path, std::regex("/spaces/[^/]+"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)"));
+                SpaceId space_id = match[1];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                Space out;
+                StatusCode status = service_.get_space(actor_id, space_id, out);
+                if (status == StatusCode::Ok) {
+                    json::object obj;
+                    obj["id"] = out.id;
+                    obj["owner_id"] = out.owner_id;
+                    obj["revision"] = out.revision;
+
+                    json::array members;
+                    for (const auto &m: out.memberships) {
+                        members.push_back(json::object{{"user_id", m.user_id}, {"role", static_cast<int>(m.role)}});
+                    }
+                    obj["members"] = members;
+
+                    std::vector<Node> nodes;
+                    if (service_.list_nodes(actor_id, space_id, nodes) == StatusCode::Ok) {
+                        json::array nodes_arr;
+                        for (const auto &n: nodes) {
+                            nodes_arr.push_back(json::object{
+                                {"id", n.id},
+                                {"content", n.content},
+                                {"content_version", n.content_version}
+                            });
+                        }
+                        obj["nodes"] = nodes_arr;
+                    }
+                    res.body() = json::serialize(obj);
+                } else if (status == StatusCode::AccessDenied) {
+                    res.result(http::status::forbidden);
+                } else if (status == StatusCode::NotFound) {
+                    res.result(http::status::not_found);
+                } else {
+                    res.result(http::status::internal_server_error);
+                }
+            } else if (method == http::verb::post && std::regex_match(path, std::regex("/spaces/[^/]+/invites"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/invites"));
+                SpaceId space_id = match[1];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                json::value jv = json::parse(req_.body());
+                UserId invitee_id = jv.as_object().at("user_id").as_string().c_str();
+                Role role = static_cast<Role>(jv.as_object().at("role").as_int64());
+                OperationResult or_ = service_.invite_user(actor_id, space_id, invitee_id, role);
+                if (or_.code == StatusCode::Ok) {
+                    json::object result;
+                    result["revision"] = or_.space_revision;
+                    res.body() = json::serialize(result);
+                } else {
+                    res.result(http::status::bad_request);
+                }
+            } else if (method == http::verb::post && std::regex_match(path, std::regex("/spaces/[^/]+/nodes"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/nodes"));
+                SpaceId space_id = match[1];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                NodeId node_id;
+                OperationResult or_ = service_.create_node(actor_id, space_id, node_id);
+                if (or_.code == StatusCode::Ok) {
+                    json::object result;
+                    result["node_id"] = node_id;
+                    result["revision"] = or_.space_revision;
+                    res.body() = json::serialize(result);
+                } else {
+                    res.result(http::status::forbidden);
+                }
+            } else if (method == http::verb::put && std::regex_match(
+                           path, std::regex("/spaces/[^/]+/nodes/[^/]+/content"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/nodes/([^/]+)/content"));
+                SpaceId space_id = match[1];
+                NodeId node_id = match[2];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                json::value jv = json::parse(req_.body());
+                std::string new_content = jv.as_object().at("content").as_string().c_str();
+                OperationResult or_ = service_.set_node_content(actor_id, space_id, node_id, new_content);
+                if (or_.code == StatusCode::Ok) {
+                    json::object result;
+                    result["revision"] = or_.space_revision;
+                    res.body() = json::serialize(result);
+                } else {
+                    res.result(http::status::forbidden);
+                }
+            } else if (method == http::verb::delete_ &&
+                       std::regex_match(path, std::regex("/spaces/[^/]+/nodes/[^/]+"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/nodes/([^/]+)"));
+                SpaceId space_id = match[1];
+                NodeId node_id = match[2];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                OperationResult or_ = service_.delete_node(actor_id, space_id, node_id);
+                if (or_.code == StatusCode::Ok) {
+                    json::object result;
+                    result["revision"] = or_.space_revision;
+                    res.body() = json::serialize(result);
+                } else {
+                    res.result(http::status::forbidden);
+                }
+            } else if (method == http::verb::put && std::regex_match(
+                           path, std::regex("/spaces/[^/]+/members/[^/]+/role"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/members/([^/]+)/role"));
+                SpaceId space_id = match[1];
+                UserId member_id = match[2];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                json::value jv = json::parse(req_.body());
+                Role role = static_cast<Role>(jv.as_object().at("role").as_int64());
+                OperationResult or_ = service_.set_member_role(actor_id, space_id, member_id, role);
+                if (or_.code == StatusCode::Ok) {
+                    json::object result;
+                    result["revision"] = or_.space_revision;
+                    res.body() = json::serialize(result);
+                } else {
+                    res.result(http::status::forbidden);
+                }
+            } else if (method == http::verb::post && std::regex_match(path, std::regex("/spaces/[^/]+/edges"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/edges"));
+                SpaceId space_id = match[1];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                json::value jv = json::parse(req_.body());
+                NodeId from = jv.as_object().at("from").as_string().c_str();
+                NodeId to = jv.as_object().at("to").as_string().c_str();
+                EdgeId edge_id;
+                OperationResult or_ = service_.create_edge(actor_id, space_id, from, to, edge_id);
+                if (or_.code == StatusCode::Ok) {
+                    json::object result;
+                    result["edge_id"] = edge_id;
+                    result["revision"] = or_.space_revision;
+                    res.body() = json::serialize(result);
+                } else {
+                    res.result(http::status::forbidden);
+                }
+            } else if (method == http::verb::get && std::regex_match(path, std::regex("/spaces/[^/]+/edges"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/edges"));
+                SpaceId space_id = match[1];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                std::vector<Edge> edges;
+                StatusCode status = service_.list_edges(actor_id, space_id, edges);
+                if (status == StatusCode::Ok) {
+                    json::array edge_list;
+                    for (const auto &e: edges) {
+                        json::object edge_obj;
+                        edge_obj["id"] = e.id;
+                        edge_obj["from"] = e.from;
+                        edge_obj["to"] = e.to;
+                        edge_list.push_back(edge_obj);
+                    }
+                    res.body() = json::serialize(edge_list);
+                } else {
+                    res.result(http::status::forbidden);
+                }
+            } else if (method == http::verb::post && std::regex_match(path, std::regex("/spaces/[^/]+/comments"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/comments"));
+                SpaceId space_id = match[1];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+                json::value jv = json::parse(req_.body());
+                std::string text = jv.as_object().at("text").as_string().c_str();
+                CommentAnchor anchor;
+                anchor.node_id = jv.as_object().at("node_id").as_string().c_str();
+                if (jv.as_object().contains("range_start")) {
+                    anchor.kind = CommentTargetKind::TextRange;
+                    anchor.range_start = static_cast<std::size_t>(jv.as_object().at("range_start").as_int64());
+                    anchor.range_end = static_cast<std::size_t>(jv.as_object().at("range_end").as_int64());
+                } else {
+                    anchor.kind = CommentTargetKind::Node;
+                }
+
+                CommentId comment_id;
+                OperationResult or_ = service_.add_comment(actor_id, space_id, anchor, text, comment_id);
+                if (or_.code == StatusCode::Ok) {
+                    json::object result;
+                    result["comment_id"] = comment_id;
+                    result["revision"] = or_.space_revision;
+                    res.body() = json::serialize(result);
+                } else {
+                    res.result(http::status::forbidden);
+                }
+            } else if (method == http::verb::get && std::regex_match(path, std::regex("/spaces/[^/]+/comments"))) {
+                std::smatch match;
+                std::regex_search(path, match, std::regex("/spaces/([^/]+)/comments"));
+                SpaceId space_id = match[1];
+                auto auth_sv = req_[http::field::authorization];
+                UserId actor_id = std::string(auth_sv.data(), auth_sv.size());
+
+                std::string node_id;
+                size_t pos = query.find("node_id=");
+                if (pos != std::string::npos) {
+                    node_id = query.substr(pos + 8);
+                    size_t amp = node_id.find('&');
+                    if (amp != std::string::npos) node_id = node_id.substr(0, amp);
+                }
+
+                std::vector<Comment> comments;
+                StatusCode status = service_.list_comments(actor_id, space_id, node_id, comments);
+                if (status == StatusCode::Ok) {
+                    json::array comment_list;
+                    for (const auto &c: comments) {
+                        json::object c_obj;
+                        c_obj["id"] = c.id;
+                        c_obj["text"] = c.text;
+                        c_obj["node_id"] = c.anchor.node_id;
+                        comment_list.push_back(c_obj);
+                    }
+                    res.body() = json::serialize(comment_list);
+                } else {
+                    res.result(http::status::forbidden);
+                }
+            } else {
+                res.result(http::status::not_found);
+                res.body() = "Not Found";
+            }
+        } catch (const std::exception &e) {
+            res.result(http::status::internal_server_error);
+            res.body() = std::string("Error: ") + e.what();
+        }
+
+        res.prepare_payload();
+        send_response(std::move(res));
+    }
+
+    void http_session::fail(beast::error_code ec, char const *what) {
+        std::cerr << what << ": " << ec.message() << std::endl;
+    }
+}
