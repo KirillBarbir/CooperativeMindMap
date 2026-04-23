@@ -22,6 +22,7 @@ namespace mind_map {
         }
 
         OperationResult result;
+        std::shared_lock<std::shared_mutex> map_lock(ctx_->spaces_mutex);
         auto it = ctx_->spaces.find(space_id);
         if (it == ctx_->spaces.end()) {
             return fail(StatusCode::NotFound);
@@ -63,6 +64,7 @@ namespace mind_map {
         }
 
         OperationResult result;
+        std::shared_lock<std::shared_mutex> map_lock(ctx_->spaces_mutex);
         auto sit = ctx_->spaces.find(space_id);
         if (sit == ctx_->spaces.end()) {
             return fail(StatusCode::NotFound);
@@ -88,6 +90,7 @@ namespace mind_map {
         }
 
         out.clear();
+        std::shared_lock<std::shared_mutex> map_lock(ctx_->spaces_mutex);
         auto it = ctx_->spaces.find(space_id);
         if (it == ctx_->spaces.end()) {
             return StatusCode::NotFound;
