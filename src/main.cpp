@@ -27,14 +27,14 @@ int main(int argc, char *argv[]) {
         asio::io_context signal_ioc;
         asio::signal_set signals(signal_ioc, SIGINT, SIGTERM);
 
-        signals.async_wait([&](const boost::system::error_code&, int) {
+        signals.async_wait([&](const boost::system::error_code &, int) {
             std::cout << "\nStopping server..." << std::endl;
             server.stop();
         });
 
         std::cout << "Server is running on port " << port << " with " << threads << " threads!" << std::endl;
         std::cout << "Press Ctrl+C to stop..." << std::endl;
-        
+
         signal_ioc.run();
         std::cout << "Server stopped!" << std::endl;
     } catch (const std::exception &e) {
