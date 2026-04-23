@@ -12,8 +12,11 @@
 
 namespace mind_map {
     struct NodeRecord {
+        std::string title = "New Node";
         std::string content;
         Version content_version = 1;
+        double x = 0;
+        double y = 0;
     };
 
     struct CommentRecord {

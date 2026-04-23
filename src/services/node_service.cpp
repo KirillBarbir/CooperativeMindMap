@@ -205,6 +205,91 @@ namespace mind_map {
         return result;
     }
 
+    OperationResult MindMapService::set_node_title(UserId actor_id, SpaceId space_id, NodeId node_id,
+                                                   std::string new_title, std::optional<Version> if_match_space_revision) {
+        if (require_non_empty(actor_id, space_id, node_id) != StatusCode::Ok) {
+            return fail(StatusCode::InvalidArgument);
+        }
+
+        OperationResult result;
+        std::shared_lock<std::shared_mutex> map_lock(ctx_->spaces_mutex);
+        auto it = ctx_->spaces.find(space_id);
+        if (it == ctx_->spaces.end()) {
+            return fail(StatusCode::NotFound);
+        }
+        SpaceAggregate &sp = *it->second;
+
+        {
+            std::unique_lock<std::shared_mutex> lock(sp.mutex);
+            if (!has_access(actor_id, sp)) {
+                return fail(StatusCode::AccessDenied, sp.revision);
+            }
+
+            const Role eff = access::effective_role(actor_id, sp.owner_id, member_role_lookup(sp, actor_id));
+            if (!access::can_edit_node_content(eff)) {
+                return fail(StatusCode::AccessDenied, sp.revision);
+            }
+
+            if (check_revision(if_match_space_revision, sp.revision) != StatusCode::Ok) {
+                return fail(StatusCode::VersionMismatch, sp.revision);
+            }
+
+            auto nit = sp.nodes.find(node_id);
+            if (nit == sp.nodes.end()) {
+                return fail(StatusCode::NotFound, sp.revision);
+            }
+
+            nit->second.title = std::move(new_title);
+            sp.revision += 1;
+            result = ok(sp.revision);
+        }
+
+        return result;
+    }
+
+    OperationResult MindMapService::set_node_position(UserId actor_id, SpaceId space_id, NodeId node_id, double x,
+                                                      double y, std::optional<Version> if_match_space_revision) {
+        if (require_non_empty(actor_id, space_id, node_id) != StatusCode::Ok) {
+            return fail(StatusCode::InvalidArgument);
+        }
+
+        OperationResult result;
+        std::shared_lock<std::shared_mutex> map_lock(ctx_->spaces_mutex);
+        auto it = ctx_->spaces.find(space_id);
+        if (it == ctx_->spaces.end()) {
+            return fail(StatusCode::NotFound);
+        }
+        SpaceAggregate &sp = *it->second;
+
+        {
+            std::unique_lock<std::shared_mutex> lock(sp.mutex);
+            if (!has_access(actor_id, sp)) {
+                return fail(StatusCode::AccessDenied, sp.revision);
+            }
+
+            const Role eff = access::effective_role(actor_id, sp.owner_id, member_role_lookup(sp, actor_id));
+            if (!access::can_edit_node_content(eff)) {
+                return fail(StatusCode::AccessDenied, sp.revision);
+            }
+
+            if (check_revision(if_match_space_revision, sp.revision) != StatusCode::Ok) {
+                return fail(StatusCode::VersionMismatch, sp.revision);
+            }
+
+            auto nit = sp.nodes.find(node_id);
+            if (nit == sp.nodes.end()) {
+                return fail(StatusCode::NotFound, sp.revision);
+            }
+
+            nit->second.x = x;
+            nit->second.y = y;
+            sp.revision += 1;
+            result = ok(sp.revision);
+        }
+
+        return result;
+    }
+
     StatusCode MindMapService::list_nodes(UserId actor_id, SpaceId space_id,
                                           std::vector<Node> &out) const {
         if (require_non_empty(actor_id, space_id) != StatusCode::Ok) {
@@ -212,6 +297,7 @@ namespace mind_map {
         }
 
         out.clear();
+        std::shared_lock<std::shared_mutex> map_lock(ctx_->spaces_mutex);
         auto it = ctx_->spaces.find(space_id);
         if (it == ctx_->spaces.end()) {
             return StatusCode::NotFound;
@@ -226,8 +312,11 @@ namespace mind_map {
         for (const auto &[nid, rec]: sp.nodes) {
             Node n;
             n.id = nid;
+            n.title = rec.title;
             n.content = rec.content;
             n.content_version = rec.content_version;
+            n.x = rec.x;
+            n.y = rec.y;
             out.push_back(std::move(n));
         }
         std::sort(out.begin(), out.end(), [](const Node &a, const Node &b) { return a.id < b.id; });

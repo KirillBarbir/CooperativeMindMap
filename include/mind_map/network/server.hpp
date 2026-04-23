@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mind_map/services/mind_map_service.hpp"
+#include "mind_map/network/sessions.hpp"
 #include <boost/asio.hpp>
 
 #include <vector>
@@ -17,6 +18,7 @@ namespace mind_map::network {
 
     private:
         MindMapService &service_;
+        session_manager manager_;
         boost::asio::io_context ioc_;
         unsigned short port_;
         int threads_;

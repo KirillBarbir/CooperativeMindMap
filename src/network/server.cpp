@@ -21,10 +21,12 @@ namespace mind_map::network {
         asio::io_context &ioc_;
         tcp::acceptor acceptor_;
         MindMapService &service_;
+        session_manager &manager_;
 
     public:
         listener(asio::io_context &ioc, const tcp::endpoint &endpoint,
-                 MindMapService &service) : ioc_(ioc), acceptor_(ioc), service_(service) {
+                 MindMapService &service, session_manager &manager) 
+            : ioc_(ioc), acceptor_(ioc), service_(service), manager_(manager) {
             beast::error_code ec;
             acceptor_.open(endpoint.protocol(), ec);
             if (ec) {
@@ -62,19 +64,20 @@ namespace mind_map::network {
             if (ec) {
                 return fail(ec, "accept");
             }
-            std::make_shared<http_session>(std::move(socket), service_)->run();
+            // Создаем http_session с использованием strand для обеспечения потокобезопасности
+            std::make_shared<http_session>(std::move(socket), service_, manager_)->run();
             do_accept();
         }
     };
 
     NetworkServer::NetworkServer(MindMapService &service, unsigned short port, int threads) : service_(service),
-        ioc_(threads), port_(port), threads_(threads) {
+        manager_(), ioc_(threads), port_(port), threads_(threads) {
     }
 
     void NetworkServer::start() {
         auto endpoint = tcp::endpoint{asio::ip::make_address("127.0.0.1"), port_};
 
-        std::make_shared<listener>(ioc_, endpoint, service_)->run();
+        std::make_shared<listener>(ioc_, endpoint, service_, manager_)->run();
 
         thread_pool_.reserve(threads_);
         for (int i = 0; i < threads_; ++i) {

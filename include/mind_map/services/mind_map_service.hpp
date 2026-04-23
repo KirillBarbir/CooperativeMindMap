@@ -46,6 +46,12 @@ namespace mind_map {
                                          std::optional<Version> if_match_space_revision = {},
                                          std::optional<Version> if_match_node_content_version = {});
 
+        OperationResult set_node_title(UserId actor_id, SpaceId space_id, NodeId node_id, std::string new_title,
+                                       std::optional<Version> if_match_space_revision = {});
+
+        OperationResult set_node_position(UserId actor_id, SpaceId space_id, NodeId node_id, double x, double y,
+                                          std::optional<Version> if_match_space_revision = {});
+
         OperationResult create_edge(UserId actor_id, SpaceId space_id, NodeId from, NodeId to, EdgeId &out_edge_id,
                                     std::optional<Version> if_match_space_revision = {});
 
